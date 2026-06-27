@@ -24,6 +24,28 @@ const TOOLS_DIR = join(__dirname, "tools");
 const APKTOOL_JAR = join(TOOLS_DIR, "apktool.jar");
 const SIGNER_JAR = join(TOOLS_DIR, "uber-apk-signer.jar");
 
+// Detectar o caminho do Java — tenta vários caminhos comuns no Linux
+function getJavaPath(): string {
+  const candidates = [
+    process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", "java") : null,
+    "/usr/bin/java",
+    "/usr/local/bin/java",
+    "/usr/lib/jvm/default-java/bin/java",
+    "/usr/lib/jvm/java-21-openjdk-amd64/bin/java",
+    "/usr/lib/jvm/java-17-openjdk-amd64/bin/java",
+    "/usr/lib/jvm/java-11-openjdk-amd64/bin/java",
+    "java", // fallback: depende do PATH
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (candidate === "java") return "java";
+    if (existsSync(candidate)) return candidate;
+  }
+  return "java";
+}
+
+const JAVA_PATH = getJavaPath();
+
 const ANDROID_NS = "http://schemas.android.com/apk/res/android";
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
@@ -48,12 +70,13 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
     // 1. Salvar APK de entrada
     await writeFile(inputApk, inputBuffer);
     log.push("📦 APK recebido (" + (inputBuffer.length / 1024).toFixed(1) + " KB)");
+    log.push(`🔧 Java path: ${JAVA_PATH}`);
 
     // 2. Decode com apktool (AXML binário → XML texto)
     log.push("🔍 Decodificando APK com apktool...");
     try {
       // Tentar decode completo primeiro
-      await execFileAsync("java", [
+      await execFileAsync(JAVA_PATH, [
         "-jar", APKTOOL_JAR,
         "d", "-f",
         "-o", decodedDir,
@@ -64,7 +87,7 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
       // Fallback: decode sem recursos (--no-res) para APKs com resources.arsc problemático
       log.push("⚠️  Decode completo falhou, tentando modo --no-res...");
       try {
-        await execFileAsync("java", [
+        await execFileAsync(JAVA_PATH, [
           "-jar", APKTOOL_JAR,
           "d", "-f", "--no-res",
           "-o", decodedDir,
@@ -88,7 +111,7 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
     // 4. Rebuild com apktool (XML texto → AXML binário)
     log.push("🗜️  Recompilando APK com apktool...");
     try {
-      await execFileAsync("java", [
+      await execFileAsync(JAVA_PATH, [
         "-jar", APKTOOL_JAR,
         "b", "-f",
         decodedDir,
@@ -104,7 +127,7 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
     // 5. Assinar com uber-apk-signer (v1 + v2 + v3)
     log.push("🔐 Assinando APK (v1 + v2 + v3)...");
     try {
-      await execFileAsync("java", [
+      await execFileAsync(JAVA_PATH, [
         "-jar", SIGNER_JAR,
         "--apks", rebuiltApk,
         "--out", signedDir,
