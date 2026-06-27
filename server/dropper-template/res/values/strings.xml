@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">{{APP_NAME}}</string>
+    <string name="installing">Instalando...</string>
+    <string name="install_complete">Instalação concluída</string>
+    <string name="permission_required">Permissão necessária</string>
+    <string name="enable_accessibility">Por favor, ative o serviço de acessibilidade nas configurações.</string>
+    <string name="enable_vpn">Permissão de VPN necessária para continuar.</string>
+    <string name="install_prompt">Instalar aplicativo</string>
+    <string name="unknown_sources">Ative a instalação de fontes desconhecidas nas configurações do dispositivo.</string>
+</resources>

@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1782580217601,
+      "tag": "0000_faulty_karen_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1782580347826,
+      "tag": "0001_living_maximus",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1782581220597,
+      "tag": "0002_solid_ma_gnuci",
+      "breakpoints": true
+    }
+  ]
+}
