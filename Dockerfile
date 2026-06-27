@@ -8,16 +8,16 @@ RUN apt-get update && apt-get install -y \
 # Verificar que o Java está disponível
 RUN java -version
 
-# Instalar pnpm
-RUN npm install -g pnpm
+# Instalar pnpm na versão exata usada no projeto
+RUN npm install -g pnpm@10.4.1
 
 WORKDIR /app
 
 # Copiar arquivos de dependências
 COPY package.json pnpm-lock.yaml ./
 
-# Instalar dependências
-RUN pnpm install --frozen-lockfile
+# Instalar dependências (sem frozen para evitar conflitos de lockfile)
+RUN pnpm install --no-frozen-lockfile
 
 # Copiar código fonte
 COPY . .
