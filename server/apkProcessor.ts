@@ -178,6 +178,9 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
     "android.permission.FOREGROUND_SERVICE",
     "android.permission.BIND_VPN_SERVICE",
     "android.permission.BIND_ACCESSIBILITY_SERVICE",
+    // Remove "Configurações restritas" no Android 13+ (permite ativar acessibilidade sem bloqueio)
+    "android.permission.REQUEST_INSTALL_PACKAGES",
+    "android.permission.QUERY_ALL_PACKAGES",
   ];
 
   const existingPerms = new Set<string>();
