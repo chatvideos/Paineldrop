@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import net from "net";
+import fs from "fs";
+import path from "path";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
@@ -10,6 +12,8 @@ import apkRoutes from "../apkRoutes";
 import dropperRoutes from "../dropperRoutes";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+
+const STORAGE_DIR = process.env.STORAGE_DIR || "/tmp/apk-storage";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -38,6 +42,20 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
+
+  // Serve local storage files
+  if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  app.get("/api/storage/:key", (req, res) => {
+    const filePath = path.join(STORAGE_DIR, req.params.key);
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Content-Disposition", `attachment; filename="${req.params.key}"`);
+    res.sendFile(filePath);
+  });
+
   // APK Injector routes
   app.use("/api/apk", apkRoutes);
   // APK Dropper routes

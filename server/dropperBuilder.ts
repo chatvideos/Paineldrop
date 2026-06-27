@@ -10,12 +10,8 @@
 import AdmZip from "adm-zip";
 import * as forge from "node-forge";
 import path from "path";
-import { fileURLToPath } from "url";
 import fs from "fs";
 import sharp from "sharp";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -33,7 +29,7 @@ export interface DropperBuildResult {
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
 
-const TEMPLATE_PATH = path.join(__dirname, "..", "server", "dropper-template", "dropper_base.apk");
+const TEMPLATE_PATH = path.join(process.cwd(), "server", "dropper-template", "dropper_base.apk");
 
 const ICON_SIZES: Record<string, number> = {
   "res/mipmap-mdpi/ic_launcher.png": 48,
