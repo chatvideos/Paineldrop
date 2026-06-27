@@ -23,3 +23,9 @@ export async function updateApkJob(
   if (!db) throw new Error("Database not available");
   await db.update(apkJobs).set(data).where(eq(apkJobs.id, id));
 }
+
+export async function deleteApkJob(id: string): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.delete(apkJobs).where(eq(apkJobs.id, id));
+}

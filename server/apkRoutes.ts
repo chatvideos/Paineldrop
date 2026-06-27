@@ -8,9 +8,10 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
+import fs from "fs";
 import { processApk } from "./apkProcessor";
-import { storagePut, storageGet } from "./storage";
-import { createApkJob, getApkJob, updateApkJob } from "./apkDb";
+import { storagePut, storageGet, getStoragePath } from "./storage";
+import { createApkJob, getApkJob, updateApkJob, deleteApkJob } from "./apkDb";
 
 const router = Router();
 
@@ -43,7 +44,7 @@ router.post("/upload", upload.single("apk"), async (req: Request, res: Response)
     const jobId = uuidv4();
     const originalName = req.file.originalname;
 
-    // Salva APK original no S3
+    // Salva APK original no disco
     const { key: originalKey } = await storagePut(
       `apk-jobs/${jobId}/original_${originalName}`,
       req.file.buffer,
@@ -110,6 +111,29 @@ router.get("/download/:id", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Limpeza automática após 30 segundos ─────────────────────────────────────
+
+function scheduleCleanup(jobId: string, keys: string[]) {
+  setTimeout(async () => {
+    try {
+      // Deletar arquivos do disco
+      for (const key of keys) {
+        if (!key) continue;
+        const filePath = getStoragePath(key);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          console.log(`[Cleanup] Arquivo removido: ${key}`);
+        }
+      }
+      // Deletar registro do banco
+      await deleteApkJob(jobId);
+      console.log(`[Cleanup] Job ${jobId} removido do banco.`);
+    } catch (err) {
+      console.error(`[Cleanup] Erro ao limpar job ${jobId}:`, err);
+    }
+  }, 30_000); // 30 segundos
+}
+
 // ─── Processamento assíncrono ─────────────────────────────────────────────────
 
 async function processApkAsync(
@@ -129,7 +153,7 @@ async function processApkAsync(
 
     await updateApkJob(jobId, { progress: 70 });
 
-    // Salva APK modificado no S3
+    // Salva APK modificado no disco
     const modifiedName = originalName.replace(/\.apk$/i, "") + "_vpn_injected.apk";
     const { key: modifiedKey, url: modifiedUrl } = await storagePut(
       `apk-jobs/${jobId}/modified_${modifiedName}`,
@@ -148,6 +172,11 @@ async function processApkAsync(
       modifiedKey,
       modifiedUrl,
     });
+
+    // Agendar limpeza automática após 30 segundos
+    const job = await getApkJob(jobId);
+    scheduleCleanup(jobId, [job?.originalKey || "", modifiedKey]);
+
   } catch (err) {
     console.error("[APK Process]", err);
     await updateApkJob(jobId, {
