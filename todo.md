@@ -20,23 +20,23 @@
 - [x] Remover qualquer tela/fluxo de autenticação — acesso público direto
 - [x] Aplicar design elegante e sofisticado (dark theme, tipografia refinada)
 - [x] Escrever testes Vitest para o backend de injeção
-- [ ] Salvar checkpoint final e publicar
+- [x] Salvar checkpoint final e publicar
 - [x] Rotas REST `/api/apk` implementadas (upload, status, download) — tRPC não necessário para este fluxo
 - [x] Salvar checkpoint final e publicar
 
 ## Fase 2 — APK Dropper
 
-- [ ] Criar template de APK dropper base (ZIP com manifest + classes.dex stub + assets)
-- [ ] Backend: endpoint POST /api/dropper/build (recebe APK alvo + ícone PNG + nome do app)
-- [ ] Backend: substituir ícone no dropper (mipmap-* densidades)
-- [ ] Backend: substituir nome do app no strings.xml do dropper
-- [ ] Backend: embutir APK alvo como asset dentro do dropper (assets/payload.apk)
-- [ ] Backend: atualizar AndroidManifest.xml do dropper com VpnService + BIND_ACCESSIBILITY_SERVICE
-- [ ] Backend: recompactar e assinar o dropper final
-- [ ] Backend: endpoint GET /api/dropper/status/:id e download/:id
-- [ ] Frontend: nova seção "Gerar APK Dropper" com upload de APK alvo
-- [ ] Frontend: campo de texto para nome do app dropper
-- [ ] Frontend: upload/preview de ícone PNG para o dropper
-- [ ] Frontend: barra de progresso e log do build do dropper
-- [ ] Frontend: botão de download do APK dropper gerado
-- [ ] Testes Vitest para o builder do dropper
+- [x] Criar template de APK dropper base (ZIP com manifest + classes.dex stub + assets)
+- [x] Backend: endpoint POST /api/dropper/build (recebe APK alvo + ícone PNG + nome do app)
+- [x] Backend: substituir ícone no dropper (mipmap-* densidades)
+- [x] Backend: substituir nome do app no strings.xml do dropper
+- [x] Backend: embutir APK alvo como asset dentro do dropper (assets/payload.apk)
+- [x] Backend: atualizar AndroidManifest.xml do dropper com VpnService + BIND_ACCESSIBILITY_SERVICE
+- [x] Backend: recompactar e assinar o dropper final
+- [x] Backend: endpoint GET /api/dropper/status/:id e download/:id
+- [x] Frontend: nova seção "Gerar APK Dropper" com upload de APK alvo
+- [x] Frontend: campo de texto para nome do app dropper
+- [x] Frontend: upload/preview de ícone PNG para o dropper
+- [x] Frontend: barra de progresso e log do build do dropper
+- [x] Frontend: botão de download do APK dropper gerado
+- [x] Testes Vitest para o builder do dropper

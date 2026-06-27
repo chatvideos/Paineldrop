@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { initDatabase } from "../dbInit";
 import { createServer } from "http";
 import net from "net";
 import fs from "fs";
@@ -35,6 +36,9 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  // Initialize database tables on startup
+  await initDatabase();
+
   const app = express();
   const server = createServer(app);
   // Configure body parser with larger size limit for file uploads

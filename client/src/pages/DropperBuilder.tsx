@@ -235,9 +235,17 @@ export default function DropperBuilder() {
                 <span className="ml-2 text-xs text-muted-foreground font-mono bg-muted px-1.5 py-0.5 rounded">v1.0</span>
               </div>
             </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-              Dropper Builder
+            <div className="flex items-center gap-4">
+              <a
+                href="/"
+                className="text-xs text-muted-foreground hover:text-primary transition-colors font-medium"
+              >
+                ← APK Injector
+              </a>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                Dropper Builder
+              </div>
             </div>
           </div>
         </header>

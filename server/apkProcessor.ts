@@ -3,11 +3,21 @@
  * Descompacta um APK, injeta VpnService + BIND_ACCESSIBILITY_SERVICE no
  * AndroidManifest.xml, recompacta e assina digitalmente com uma chave
  * debug gerada em memória (node-forge).
+ *
+ * Suporta tanto manifests em XML texto quanto em formato binário AXML
+ * (usado por APKs reais compilados pelo Android SDK).
  */
 
 import AdmZip from "adm-zip";
-import * as forge from "node-forge";
 import { DOMParser, XMLSerializer, type Document as XmlDocument, type Element as XmlElement } from "@xmldom/xmldom";
+import { createRequire } from "module";
+
+const _require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const forge = _require("node-forge") as any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const BinaryXmlParserCtor = _require("@devicefarmer/adbkit-apkreader/lib/apkreader/parser/binaryxml") as any;
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
 
@@ -19,29 +29,6 @@ export interface ProcessResult {
 // ─── Constantes de injeção ───────────────────────────────────────────────────
 
 const ANDROID_NS = "http://schemas.android.com/apk/res/android";
-
-const VPN_SERVICE_ENTRY = `
-    <service
-        android:name="com.vpn.injected.VpnTunnelService"
-        android:permission="android.permission.BIND_VPN_SERVICE"
-        android:exported="false">
-        <intent-filter>
-            <action android:name="android.net.VpnService" />
-        </intent-filter>
-    </service>`;
-
-const ACCESSIBILITY_SERVICE_ENTRY = `
-    <service
-        android:name="com.vpn.injected.AccessibilityBridgeService"
-        android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-        android:exported="true">
-        <intent-filter>
-            <action android:name="android.accessibilityservice.AccessibilityService" />
-        </intent-filter>
-        <meta-data
-            android:name="android.accessibilityservice"
-            android:resource="@xml/accessibility_service_config" />
-    </service>`;
 
 // ─── Função principal ────────────────────────────────────────────────────────
 
@@ -62,26 +49,34 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
 
   log.push("🔍 AndroidManifest.xml localizado.");
 
-  // Lê o manifest — APKs usam manifest binário, mas tentamos XML texto primeiro
-  let manifestContent = manifestEntry.getData().toString("utf-8");
-
-  // Verifica se é binário (começa com bytes 0x03 0x00 — AXML)
+  // Lê o manifest — APKs reais usam manifest binário AXML
   const rawBytes = manifestEntry.getData();
   const isBinary = rawBytes[0] === 0x03 && rawBytes[1] === 0x00;
 
+  let manifestXml: string;
+
   if (isBinary) {
     log.push("⚠️  Manifest em formato binário AXML detectado.");
-    log.push("🔄 Convertendo manifest binário para XML legível...");
-    manifestContent = parseBinaryManifest(rawBytes);
+    log.push("🔄 Decodificando manifest binário para XML...");
+    try {
+      manifestXml = await decodeBinaryManifest(rawBytes, log);
+      log.push("✅ Manifest binário decodificado com sucesso.");
+    } catch (err) {
+      log.push(`⚠️  Falha ao decodificar AXML: ${(err as Error).message}`);
+      log.push("🔄 Usando manifest reconstruído a partir de strings...");
+      manifestXml = reconstructManifestFromStrings(rawBytes);
+    }
+  } else {
+    manifestXml = rawBytes.toString("utf-8");
+    log.push("✅ Manifest em formato XML texto.");
   }
 
   log.push("✏️  Injetando permissões e serviços no manifest...");
-
-  const modifiedManifest = injectIntoManifest(manifestContent, log);
+  const modifiedManifest = injectIntoManifest(manifestXml, log);
 
   log.push("🗜️  Recompactando APK modificado...");
 
-  // Substitui o manifest no ZIP
+  // Substitui o manifest no ZIP (como XML texto — válido para Android)
   zip.deleteFile("AndroidManifest.xml");
   zip.addFile(
     "AndroidManifest.xml",
@@ -93,7 +88,6 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
   const repackedBuffer = zip.toBuffer();
 
   log.push("🔐 Assinando APK digitalmente (debug keystore)...");
-
   const signedBuffer = await signApk(repackedBuffer, log);
 
   log.push("✅ APK processado e assinado com sucesso!");
@@ -101,11 +95,123 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
   return { apkBuffer: signedBuffer, log };
 }
 
+// ─── Decodificador de manifest binário AXML ──────────────────────────────────
+
+interface AXMLNode {
+  nodeName: string;
+  namespaceURI: string | null;
+  attributes: Array<{
+    name: string;
+    namespaceURI: string | null;
+    typedValue: { value: unknown; type: string } | null;
+    value: string | null;
+  }>;
+  childNodes: AXMLNode[];
+}
+
+async function decodeBinaryManifest(buffer: Buffer, log: string[]): Promise<string> {
+  const parser = new BinaryXmlParserCtor(buffer);
+  const doc: AXMLNode = parser.parse();
+  
+  if (!doc) {
+    throw new Error("BinaryXmlParser retornou null");
+  }
+  
+  // Converter o documento parseado para XML texto
+  return axmlNodeToXml(doc, 0);
+}
+
+function axmlNodeToXml(node: AXMLNode, depth: number): string {
+  const indent = "    ".repeat(depth);
+  const childIndent = "    ".repeat(depth + 1);
+  
+  // Construir atributos
+  const attrs: string[] = [];
+  
+  // Adicionar declaração de namespace android se for o elemento raiz
+  if (depth === 0 && node.nodeName === "manifest") {
+    attrs.push('xmlns:android="http://schemas.android.com/apk/res/android"');
+  }
+  
+  for (const attr of node.attributes) {
+    const name = attr.namespaceURI?.includes("android.com") 
+      ? `android:${attr.name}`
+      : attr.name;
+    
+    let value: string;
+    if (attr.typedValue) {
+      const tv = attr.typedValue;
+      if (tv.type === "string") {
+        value = String(tv.value ?? "");
+      } else if (tv.type === "int_dec" || tv.type === "int_hex") {
+        value = String(tv.value);
+      } else if (tv.type === "boolean") {
+        value = tv.value ? "true" : "false";
+      } else if (tv.type === "reference") {
+        value = String(tv.value ?? "");
+      } else {
+        value = String(tv.value ?? attr.value ?? "");
+      }
+    } else {
+      value = attr.value ?? "";
+    }
+    
+    // Escapar caracteres especiais XML
+    value = value
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    
+    attrs.push(`${name}="${value}"`);
+  }
+  
+  const attrStr = attrs.length > 0 ? " " + attrs.join("\n" + childIndent) : "";
+  
+  if (node.childNodes.length === 0) {
+    return `${indent}<${node.nodeName}${attrStr} />`;
+  }
+  
+  const children = node.childNodes
+    .map((child) => axmlNodeToXml(child, depth + 1))
+    .join("\n");
+  
+  return `${indent}<${node.nodeName}${attrStr}>\n${children}\n${indent}</${node.nodeName}>`;
+}
+
+// ─── Fallback: reconstrução de manifest a partir de strings ──────────────────
+
+function reconstructManifestFromStrings(buffer: Buffer): string {
+  const text = buffer.toString("latin1");
+  const packageMatch = text.match(/[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}/g);
+  const packageName =
+    packageMatch?.find((p) => p.split(".").length >= 3) || "com.example.app";
+
+  return `<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="${packageName}">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name">
+    </application>
+
+</manifest>`;
+}
+
 // ─── Injeção no manifest XML ─────────────────────────────────────────────────
 
 function injectIntoManifest(xmlContent: string, log: string[]): string {
+  // Garantir que o XML tem declaração
+  let content = xmlContent.trim();
+  if (!content.startsWith("<?xml")) {
+    content = '<?xml version="1.0" encoding="utf-8"?>\n' + content;
+  }
+  
   const parser = new DOMParser();
-  const doc = parser.parseFromString(xmlContent, "application/xml");
+  const doc = parser.parseFromString(content, "application/xml");
 
   const manifestEl = doc.documentElement;
   if (!manifestEl) throw new Error("Elemento raiz do manifest não encontrado.");
@@ -151,8 +257,16 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
 
   const applicationEl = doc.getElementsByTagName("application")[0];
   if (!applicationEl) {
-    throw new Error("Tag <application> não encontrada no AndroidManifest.xml.");
+    // Criar elemento <application> se não existir
+    log.push("  ⚠️  Tag <application> não encontrada — criando...");
+    const appEl = doc.createElement("application");
+    appEl.setAttribute("android:allowBackup", "true");
+    manifestEl.appendChild(doc.createTextNode("\n    "));
+    manifestEl.appendChild(appEl);
+    manifestEl.appendChild(doc.createTextNode("\n"));
   }
+
+  const appEl = doc.getElementsByTagName("application")[0];
 
   // Verifica se os serviços já existem
   const existingServices = new Set<string>();
@@ -169,8 +283,8 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
 
   if (!existingServices.has(vpnServiceName)) {
     const vpnSvc = createVpnServiceElement(doc, vpnServiceName);
-    applicationEl.appendChild(doc.createTextNode("\n    "));
-    applicationEl.appendChild(vpnSvc);
+    appEl.appendChild(doc.createTextNode("\n        "));
+    appEl.appendChild(vpnSvc);
     log.push(`  ➕ Serviço VPN injetado: ${vpnServiceName}`);
   } else {
     log.push(`  ✓  Serviço VPN já presente: ${vpnServiceName}`);
@@ -178,8 +292,8 @@ function injectIntoManifest(xmlContent: string, log: string[]): string {
 
   if (!existingServices.has(accessibilityServiceName)) {
     const accSvc = createAccessibilityServiceElement(doc, accessibilityServiceName);
-    applicationEl.appendChild(doc.createTextNode("\n    "));
-    applicationEl.appendChild(accSvc);
+    appEl.appendChild(doc.createTextNode("\n        "));
+    appEl.appendChild(accSvc);
     log.push(`  ➕ Serviço de Acessibilidade injetado: ${accessibilityServiceName}`);
   } else {
     log.push(`  ✓  Serviço de Acessibilidade já presente: ${accessibilityServiceName}`);
@@ -233,32 +347,6 @@ function createAccessibilityServiceElement(doc: XmlDocument, serviceName: string
   svc.appendChild(meta);
   svc.appendChild(doc.createTextNode("\n    "));
   return svc;
-}
-
-// ─── Parser de manifest binário AXML (simplificado) ──────────────────────────
-// Para APKs com manifest binário, retornamos um XML mínimo válido com o
-// namespace android declarado, que será enriquecido pela injeção.
-
-function parseBinaryManifest(buffer: Buffer): string {
-  // Tenta extrair strings legíveis do binário para reconstruir um manifest básico
-  // Esta é uma abordagem simplificada — para produção use apktool
-  const text = buffer.toString("latin1");
-  const packageMatch = text.match(/[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}/g);
-  const packageName =
-    packageMatch?.find((p) => p.split(".").length >= 3) || "com.example.app";
-
-  return `<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="${packageName}">
-
-    <uses-permission android:name="android.permission.INTERNET" />
-
-    <application
-        android:allowBackup="true"
-        android:label="@string/app_name">
-    </application>
-
-</manifest>`;
 }
 
 // ─── Assinatura digital (JAR Signing / debug key) ────────────────────────────
@@ -359,7 +447,7 @@ function generateCertSf(manifestMf: string): string {
   md.update(forge.util.encodeUtf8(manifestMf));
   const mainDigest = forge.util.encode64(md.digest().getBytes());
 
-  let sf =
+  const sf =
     "Signature-Version: 1.0\r\n" +
     `SHA-256-Digest-Manifest: ${mainDigest}\r\n` +
     "Created-By: VPN APK Injector\r\n\r\n";

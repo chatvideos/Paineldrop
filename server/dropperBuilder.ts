@@ -8,10 +8,14 @@
  */
 
 import AdmZip from "adm-zip";
-import * as forge from "node-forge";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
+import { createRequire } from "module";
+
+const _require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const forge = _require("node-forge") as any;
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
