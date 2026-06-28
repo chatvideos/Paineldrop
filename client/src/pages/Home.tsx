@@ -243,6 +243,12 @@ export default function Home() {
             </div>
             <div className="flex items-center gap-4">
               <a
+                href="/chatstore"
+                className="text-xs text-green-400 hover:text-green-300 transition-colors font-medium"
+              >
+                🟢 ChatStore
+              </a>
+              <a
                 href="/inject"
                 className="text-xs text-violet-400 hover:text-violet-300 transition-colors font-medium"
               >

