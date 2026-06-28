@@ -243,6 +243,12 @@ export default function Home() {
             </div>
             <div className="flex items-center gap-4">
               <a
+                href="/inject"
+                className="text-xs text-violet-400 hover:text-violet-300 transition-colors font-medium"
+              >
+                ⚡ Dropper Real
+              </a>
+              <a
                 href="/dropper"
                 className="text-xs text-muted-foreground hover:text-primary transition-colors font-medium"
               >

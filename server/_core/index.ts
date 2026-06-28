@@ -60,6 +60,11 @@ async function startServer() {
     res.sendFile(filePath);
   });
 
+  // Health check (usado pelo Render e outros serviços de hospedagem)
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
   // APK Injector routes
   app.use("/api/apk", apkRoutes);
   // APK Dropper routes

@@ -111,17 +111,23 @@ export async function processApk(inputBuffer: Buffer): Promise<ProcessResult> {
     // 4. Rebuild com apktool (XML texto → AXML binário)
     log.push("🗜️  Recompilando APK com apktool...");
     try {
-      await execFileAsync(JAVA_PATH, [
+      const buildResult = await execFileAsync(JAVA_PATH, [
         "-jar", APKTOOL_JAR,
         "b", "-f",
         decodedDir,
         "-o", rebuiltApk,
-      ], { timeout: 120_000 });
+      ], { timeout: 180_000 });
       log.push("✅ APK recompilado com sucesso.");
-    } catch (err) {
-      const msg = (err as Error).message;
-      log.push(`⚠️  apktool build falhou: ${msg}`);
-      throw new Error(`Falha ao recompilar APK: ${msg}`);
+      if (buildResult.stdout) log.push(`stdout: ${buildResult.stdout.slice(0, 500)}`);
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      const stderr = err.stderr || "";
+      const stdout = err.stdout || "";
+      log.push(`⚠️  apktool build falhou`);
+      log.push(`stderr: ${stderr.slice(0, 1000)}`);
+      log.push(`stdout: ${stdout.slice(0, 1000)}`);
+      console.error("[apktool build] FULL ERROR:", { msg, stderr, stdout });
+      throw new Error(`Falha ao recompilar APK: ${stderr || msg}`);
     }
 
     // 5. Assinar com uber-apk-signer (v1 + v2 + v3)

@@ -1,0 +1,17 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+*.log
+coverage
+.nyc_output
+.DS_Store
+.vscode
+.idea
+tmp
+temp
+.manus-logs
+.webdev
+client/public/__manus__
